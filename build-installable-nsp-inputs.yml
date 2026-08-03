@@ -1,0 +1,154 @@
+name: Build installable Xbox NSP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-nsp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      APP_NAME: Xbox
+      APP_VERSION: 2.0
+      TITLE_ID: 0100A5B0C0DE0000
+      # Preferred secret: KEYS_DAT_BASE64 (base64-encoded keys.dat).
+      # Raw-text fallbacks are supported for repositories that already use them.
+      KEYS_B64: ${{ secrets.KEYS_DAT_BASE64 || secrets.PROD_KEYS_BASE64 || secrets.SWITCH_KEYS_BASE64 }}
+      KEYS_RAW: ${{ secrets.KEYS_DAT || secrets.PROD_KEYS || secrets.SWITCH_KEYS }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Verify final feature source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f Makefile
+          test -f npdm.json
+          test -f icon_nsp.jpg
+          test -f romfs/guide_logo.png
+          grep -q 'APP_TITLEID.*0100A5B0C0DE0000' Makefile
+          grep -q 'APP_VERSION.*2.0' Makefile
+          grep -q '콘솔 리모트 해상도' src/switch/main.cpp
+          grep -q 'guide_logo.png' src/switch/stream/dk_video_renderer.cpp
+
+      - name: Check encrypted key secret
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${KEYS_B64}" && -z "${KEYS_RAW}" ]]; then
+            echo 'No supported key secret was found.' >&2
+            echo 'Add KEYS_DAT_BASE64 (recommended) or KEYS_DAT in Settings > Secrets and variables > Actions.' >&2
+            exit 1
+          fi
+
+      - name: Build WebRTC dependencies
+        shell: bash
+        run: bash deps/build-switch.sh
+
+      - name: Build NRO ELF NACP and shaders
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD":/src \
+            -w /src \
+            devkitpro/devkita64 make
+
+      - name: Build NSO and NPDM
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD":/src \
+            -w /src \
+            devkitpro/devkita64 \
+            bash -lc '
+              set -euo pipefail
+              mkdir -p installable/exefs
+              elf2nso green-nx.elf installable/exefs/main
+              npdmtool npdm.json installable/exefs/main.npdm
+            '
+
+      - name: Prepare NSP workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf nsp-build
+          mkdir -p nsp-build/exefs nsp-build/control nsp-build/romfs
+
+          cp installable/exefs/main nsp-build/exefs/main
+          cp installable/exefs/main.npdm nsp-build/exefs/main.npdm
+          cp green-nx.nacp nsp-build/control/control.nacp
+          cp icon_nsp.jpg nsp-build/control/icon_AmericanEnglish.dat
+          cp icon_nsp.jpg nsp-build/control/icon_Korean.dat
+          cp -a romfs/. nsp-build/romfs/
+          cp package_nsp_linux.sh nsp-build/
+
+          test -s nsp-build/exefs/main
+          test -s nsp-build/exefs/main.npdm
+          test -s nsp-build/control/control.nacp
+          test -s nsp-build/control/icon_Korean.dat
+          test -s nsp-build/romfs/guide_logo.png
+
+      - name: Build hacBrewPack from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential ca-certificates git
+
+          rm -rf tools/hacBrewPack
+          git clone --depth 1 https://github.com/pplatoon/hacBrewPack.git tools/hacBrewPack
+          cp tools/hacBrewPack/config.mk.template tools/hacBrewPack/config.mk
+          make -C tools/hacBrewPack -j2
+          install -m 0755 tools/hacBrewPack/hacbrewpack nsp-build/hacbrewpack
+          test -x nsp-build/hacbrewpack
+
+      - name: Restore keys.dat from encrypted secret
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+
+          if [[ -n "${KEYS_B64}" ]]; then
+            printf '%s' "${KEYS_B64}" | tr -d '\r\n ' | base64 --decode > nsp-build/keys.dat
+          else
+            printf '%s\n' "${KEYS_RAW}" > nsp-build/keys.dat
+          fi
+
+          test -s nsp-build/keys.dat
+          grep -Eq '^[[:space:]]*header_key[[:space:]]*=' nsp-build/keys.dat
+          grep -Eq '^[[:space:]]*key_area_key_application_[0-9a-fA-F]{2}[[:space:]]*=' nsp-build/keys.dat
+          chmod 600 nsp-build/keys.dat
+
+      - name: Package installable NSP
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd nsp-build
+          chmod +x package_nsp_linux.sh
+          ./package_nsp_linux.sh
+          test -s "final_nsp/${APP_NAME}-${APP_VERSION}-${TITLE_ID}.nsp"
+          sha256sum "final_nsp/${APP_NAME}-${APP_VERSION}-${TITLE_ID}.nsp" > final_nsp/SHA256SUMS.txt
+          cp ../green-nx.nro "final_nsp/${APP_NAME}-${APP_VERSION}.nro"
+
+      - name: Remove key material
+        if: always()
+        shell: bash
+        run: |
+          rm -f nsp-build/keys.dat
+
+      - name: Upload final NSP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xbox-${{ env.APP_VERSION }}-installable-NSP
+          path: nsp-build/final_nsp/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

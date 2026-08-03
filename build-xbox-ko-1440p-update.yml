@@ -1,0 +1,84 @@
+name: Build Xbox Korean 1440p Update Inputs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Verify reconstructed custom source
+        run: |
+          test -f Makefile
+          test -f src/switch/main.cpp
+          test -f src/core/session.cpp
+          test -f src/core/session.hpp
+          test -f src/switch/stream/engine.cpp
+          test -f npdm.json
+          test -f icon.jpg
+          test -f romfs/splash_logo.png
+          grep -q 'P1440' src/core/session.hpp
+          grep -q '제작자 익명_c7ry1q3' src/switch/main.cpp
+          grep -q 'sdmc:/switch/xbox' src/switch/main.cpp
+          grep -q 'APP_TITLEID.*0100A5B0C0DE0000' Makefile
+          grep -q 'APP_VERSION.*2.0' Makefile
+          for n in $(seq -w 1 10); do
+            test -f "romfs/backgrounds/background_${n}.png"
+          done
+
+      - name: Build WebRTC dependencies
+        run: bash deps/build-switch.sh
+
+      - name: Build NRO ELF NACP and shaders
+        run: |
+          docker run --rm \
+            -v "$PWD":/src \
+            -w /src \
+            devkitpro/devkita64 make
+
+      - name: Build NSO and NPDM
+        run: |
+          docker run --rm \
+            -v "$PWD":/src \
+            -w /src \
+            devkitpro/devkita64 \
+            bash -lc '
+              mkdir -p installable/exefs
+              elf2nso green-nx.elf installable/exefs/main
+              npdmtool npdm.json installable/exefs/main.npdm
+            '
+
+      - name: Prepare NSP update inputs and SD package
+        run: |
+          mkdir -p output/exefs output/control output/romfs
+          mkdir -p output/sdcard/switch/xbox/backgrounds
+
+          cp installable/exefs/main output/exefs/main
+          cp installable/exefs/main.npdm output/exefs/main.npdm
+          cp green-nx.nacp output/control/control.nacp
+          cp icon.jpg output/control/icon_AmericanEnglish.dat
+          cp icon.jpg output/control/icon_Korean.dat
+          cp -a romfs/. output/romfs/
+
+          cp romfs/backgrounds/*.png output/sdcard/switch/xbox/backgrounds/
+          cp romfs/splash_logo.png output/sdcard/switch/xbox/splash_logo.png
+          cp green-nx.nro output/Xbox-2.0-1440p.nro
+          cp package_nsp_windows.bat output/
+          cp package_nsp_linux.sh output/
+          cp README_KO.md output/
+          printf '%s\n' '0100A5B0C0DE0000' > output/title_id.txt
+          printf '%s\n' '2.0' > output/version.txt
+
+      - name: Upload update inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: xbox-ko-1440p-v2.0-update-inputs
+          path: output
+          if-no-files-found: error
