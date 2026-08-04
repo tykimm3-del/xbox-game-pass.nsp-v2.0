@@ -62,7 +62,7 @@ TierProfile tier_profile(QualityTier tier) {
     switch (tier) {
         case QualityTier::P720: return {1280, 720, 10000, 60};
         case QualityTier::P1080: return {1920, 1080, 15000, 60};
-        case QualityTier::P1080HQ: return {1920, 1080, 25000, 60};
+        case QualityTier::P1080HQ: return {1920, 1080, 23000, 60};
         case QualityTier::P1440: return {2560, 1440, 35000, 60};
         case QualityTier::P1440HQ: return {2560, 1440, 45000, 60};
     }
